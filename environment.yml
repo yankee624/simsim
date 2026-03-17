@@ -130,7 +130,6 @@ dependencies:
       - pyparsing==3.3.2
       - pysplashsurf==0.14.0.0
       - python-dotenv==1.2.2
-      - pyuipc==0.12.0
       - pyyaml==6.0.3
       - quadrants==0.4.4
       - requests==2.32.5
