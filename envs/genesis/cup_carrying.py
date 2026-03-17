@@ -171,6 +171,7 @@ class CupCarryingSim:
         self.cam          = None
         self.n_particles  = 0
         self._cup_pos     = self.cup_init_pos.copy()
+        self._cup_vel     = np.zeros(3)   # velocity for acceleration computation
         self._step_times: List[float] = []
         self.frame_count  = 0
 
@@ -194,11 +195,6 @@ class CupCarryingSim:
                 grid_density=f.grid_density,
                 lower_bound=self.bound_min,
                 upper_bound=self.bound_max,
-                enable_CPIC=True,
-            ),
-            rigid_options=gs.options.solvers.RigidOptions(
-                dt=f.dt,
-                enable_collision=True,
             ),
             show_viewer=False,
         )
@@ -206,16 +202,17 @@ class CupCarryingSim:
         # Ground
         self.scene.add_entity(gs.morphs.Plane())
 
-        # Cup walls: non-fixed with rho=1e6 so fluid forces can't move them.
-        # We control them kinematically: set_pos() + set_dofs_velocity() each step
-        # so the MPM solver sees both correct position AND velocity boundary condition.
+        # Cup walls: fixed=True so MPM sees velocity=0 boundary (correct for the
+        # cup's reference frame, where walls are stationary).
+        # Physics: pseudo-force = -a_cup is applied to the fluid each step via
+        # set_gravity(), simulating the cup moving without actual rigid coupling.
+        # Visual: set_pos() teleports walls each step so the rendering looks correct.
         # Wall thickness >= 2.5 × particle_size ensures MPM grid detects the wall.
         cup_color = (0.75, 0.75, 0.80, 0.7)
         self.cup_parts = []
         for pos, size in _cup_walls(cx, cy, cz, th):
             part = self.scene.add_entity(
-                gs.morphs.Box(pos=pos, size=size, fixed=False),
-                material=gs.materials.Rigid(rho=1e6),
+                gs.morphs.Box(pos=pos, size=size, fixed=True),
                 surface=gs.surfaces.Default(color=cup_color),
             )
             self.cup_parts.append(part)
@@ -239,8 +236,10 @@ class CupCarryingSim:
         self.scene.build()
         self.n_particles  = self.fluid.n_particles
         self._cup_pos     = self.cup_init_pos.copy()
+        self._cup_vel     = np.zeros(3)
         self._step_times  = []
         self.frame_count  = 0
+        self._mpm_solver  = self.scene.sim.mpm_solver
         return self.n_particles
 
     # ------------------------------------------------------------------ step
@@ -249,28 +248,40 @@ class CupCarryingSim:
         """Advance one scene step, optionally moving the cup by `delta` (m)."""
         if delta is not None:
             self._move_cup(np.array(delta, dtype=float))
+        else:
+            # No cup movement: zero out any previous pseudo-force, reset gravity
+            self._cup_vel[:] = 0.0
+            self._mpm_solver.set_gravity(np.array([0.0, 0.0, -9.81]))
         t0 = time.perf_counter()
         self.scene.step()
         self._step_times.append(time.perf_counter() - t0)
         self.frame_count += 1
 
     def _move_cup(self, delta: np.ndarray):
-        """Move cup kinematically: set position + velocity so MPM coupling works.
+        """Apply cup motion as a pseudo-force on the fluid (reference frame transform).
 
-        set_pos()           → corrects position each step (prevents drift)
-        set_dofs_velocity() → tells MPM solver the boundary velocity so fluid
-                              gets pushed instead of being treated as a static wall
+        Physics: in the cup's reference frame the walls are stationary and the fluid
+        experiences an inertial pseudo-force  F = -m * a_cup  (in addition to gravity).
+        We implement this by modifying the MPM effective gravity each step:
+            g_eff = (0, 0, -9.81) - a_cup
+
+        Visual: cup walls (fixed=True) are teleported via set_pos() so the render
+        looks correct even though their velocity is 0 from the physics' perspective.
         """
-        self._cup_pos += delta
-        # Velocity = displacement / scene step duration
         scene_step_dt = self.fidelity.dt * self.fidelity.substeps
-        v = delta / max(scene_step_dt, 1e-9)
-        dof_vel = np.array([v[0], v[1], v[2], 0.0, 0.0, 0.0])
+        new_vel = delta / max(scene_step_dt, 1e-9)
+        a_cup   = (new_vel - self._cup_vel) / max(scene_step_dt, 1e-9)
+        self._cup_vel = new_vel
+        self._cup_pos += delta
 
+        # Effective gravity: subtract cup acceleration (pseudo-force in cup frame)
+        g_eff = np.array([0.0 - a_cup[0], 0.0 - a_cup[1], -9.81 - a_cup[2]])
+        self._mpm_solver.set_gravity(g_eff)
+
+        # Teleport walls for correct rendering (physics unaffected — fixed=True)
         new_geoms = _cup_walls(*self._cup_pos, self._wall_th)
         for part, (pos, _) in zip(self.cup_parts, new_geoms):
             part.set_pos(np.array(pos))
-            part.set_dofs_velocity(dof_vel)
 
     # ------------------------------------------------------------------ metrics
 
@@ -289,8 +300,11 @@ class CupCarryingSim:
         return self.get_spill_count() / self.n_particles
 
     def _inside_cup(self, pos: np.ndarray) -> np.ndarray:
-        """Boolean mask: True if particle is geometrically inside cup."""
-        cx, cy, cz = self._cup_pos
+        """Boolean mask: True if particle is geometrically inside cup.
+
+        Cup walls are fixed at cup_init_pos in the physics simulation.
+        """
+        cx, cy, cz = self.cup_init_pos   # walls are at init pos (fixed=True)
         th = self._wall_th
         r  = CUP_RADIUS + th          # outer edge
         z0 = cz                       # bottom outer surface
