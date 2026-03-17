@@ -1,0 +1,12 @@
+videos/
+__pycache__/
+*.pyc
+*.pyo
+.claude/
+*.egg-info/
+/tmp/
+*.mp4
+*.png
+*.npy
+*.npz
+run_ipc.sh
