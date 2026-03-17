@@ -194,6 +194,7 @@ class CupCarryingSim:
                 grid_density=f.grid_density,
                 lower_bound=self.bound_min,
                 upper_bound=self.bound_max,
+                enable_CPIC=True,
             ),
             rigid_options=gs.options.solvers.RigidOptions(
                 dt=f.dt,
